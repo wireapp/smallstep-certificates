@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"regexp"
 
 	"golang.org/x/net/idna"
 
@@ -150,12 +151,43 @@ func (e *NamePolicyEngine) validateNames(dnsNames []string, ips []net.IP, emailA
 		}
 		// TODO(hs): ideally we'd like the uri.String() to be the original contents; now
 		// it's transformed into ASCII. Prevent that here?
-		if err := checkNameConstraints(URINameType, uri.String(), uri,
-			func(parsedName, constraint interface{}) (bool, error) {
-				return e.matchURIConstraint(parsedName.(*url.URL), constraint.(string))
-			}, e.permittedURIDomains, e.excludedURIDomains); err != nil {
-			return err
-		}
+		
+		if strings.HasPrefix(uri.String(), "im:") {
+		    localpart, domain, err := parseImURI(uri.String())
+			_ = localpart
+		    if err != nil {
+				return &NamePolicyError{
+					Reason:   NotAllowed,
+					NameType: URINameType,
+					Name:     uri.String(),
+					detail:   fmt.Sprintf("could not parse im: URI (%q) to match against constraints", uri.String()),
+				}
+		    }
+
+			if err := checkNameConstraints(URINameType, uri.String(), domain,
+				func(domain, constraint interface{}) (bool, error) {
+					return e.matchDomainConstraint(domain.(string), constraint.(string))
+				}, e.permittedURIDomains, e.excludedURIDomains); err != nil {
+				return err
+			}
+			
+		} else if strings.HasPrefix(uri.String(), "http:") || strings.HasPrefix(uri.String(), "https:") {
+			if err := checkNameConstraints(URINameType, uri.String(), uri,
+				func(parsedName, constraint interface{}) (bool, error) {
+					return e.matchURIConstraint(parsedName.(*url.URL), constraint.(string))
+				}, e.permittedURIDomains, e.excludedURIDomains); err != nil {
+				return err
+			}
+			
+		} else {
+			return &NamePolicyError{
+				Reason:   NotAllowed,
+				NameType: URINameType,
+				Name:     uri.String(),
+				detail:   fmt.Sprintf("uri %q with unsupported scheme cannot be matched against constraints", uri.String()),
+			}
+
+		} 
 	}
 
 	for _, principal := range principals {
@@ -642,4 +674,25 @@ func matchCommonNameConstraint(commonName, constraint string) (bool, error) {
 		return false, nil
 	}
 	return strings.EqualFold(commonName, constraint), nil
+}
+
+func parseImURI(uri string) (localpart string, domain string, err error) {
+	// Define a regular expression to match the im: URI format
+	imUriRegex := regexp.MustCompile(`^im:([^@]+)@([^@]+)$`)
+
+	// Use FindStringSubmatch to extract localpart and domain
+	matches := imUriRegex.FindStringSubmatch(uri)
+
+	if matches == nil || len(matches) != 3 {
+		err = fmt.Errorf("Invalid im: URI format")
+		return
+	}
+
+    // note, the localpart may also include a service mapping, for example:
+    // in the URI im:xmpp=juliet@capulets.com, the localpart will
+    // include the xmpp service identifier.
+	localpart = matches[1]
+	domain = matches[2]
+
+	return
 }

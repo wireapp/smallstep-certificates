@@ -25,6 +25,9 @@ COPY --from=rustbuilder /src/target/release/rusty-jwt-cli /usr/local/bin/rusty-j
 
 USER root
 RUN apk add --no-cache libcap && setcap CAP_NET_BIND_SERVICE=+eip /usr/local/bin/step-ca
+RUN mkdir -p /usr/local/share/ca-certificates
+COPY --chmod 644 docker/r3.crt /usr/local/share/ca-certificates
+RUN /usr/sbin/update-ca-certificates
 USER step
 
 ENV CONFIGPATH="/home/step/config/ca.json"

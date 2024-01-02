@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"gopkg.in/square/go-jose.v2/jwt"
 	"io"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -501,6 +502,8 @@ func wireDPOP01Validate(ctx context.Context, ch *Challenge, db DB, jwk *jose.JSO
 	if err != nil {
 		return WrapErrorISE(err, "Invalid Go template registered for 'target'")
 	}
+
+	log.Printf("client-id: %s\nhandle: %s\nchallenge: %s\nissuer: %s\nkid: %s\n", challengeValues.ClientID, challengeValues.Handle, ch.Token, issuer, kid)
 
 	expiry := strconv.FormatInt(time.Now().Add(time.Hour*24*365).Unix(), 10)
 	cmd := exec.CommandContext(

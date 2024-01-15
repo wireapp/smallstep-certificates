@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"github.com/go-chi/cors"
 	"log"
 	"net"
 	"net/http"
@@ -186,6 +187,16 @@ func (ca *CA) Init(cfg *config.Config) (*CA, error) {
 	// Add HEAD middleware
 	mux.Use(middleware.GetHead)
 	insecureMux.Use(middleware.GetHead)
+
+	// Add CORS headers so web clients can use the CA
+	c := cors.New(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS", "HEAD"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "Allow", "Replay-Nonce", "Location"},
+		ExposedHeaders:   []string{"Replay-Nonce", "Location"},
+		AllowCredentials: false,
+	})
+	handler = c.Handler(handler)
 
 	// Add regular CA api endpoints in / and /1.0
 	api.Route(mux)

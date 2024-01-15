@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/json"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/smallstep/certificates/authority/provisioner"
+	"github.com/smallstep/certificates/wire"
 	"go.step.sm/crypto/x509util"
 )
 
@@ -24,6 +27,8 @@ const (
 	// PermanentIdentifier is the ACME permanent-identifier identifier type
 	// defined in https://datatracker.ietf.org/doc/html/draft-bweeks-acme-device-attest-00
 	PermanentIdentifier IdentifierType = "permanent-identifier"
+	// WireID is the Wire user identifier type
+	WireID IdentifierType = "wireapp-id"
 )
 
 // Identifier encodes the type that an order pertains to.
@@ -155,7 +160,17 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 
 	// Template data
 	data := x509util.NewTemplateData()
-	data.SetCommonName(csr.Subject.CommonName)
+	subject, err := o.subject(csr)
+	if err != nil {
+		return err
+	}
+	data.SetSubject(subject)
+
+	// Inject Wire's custom challenges into the template once they have been validated
+	dpop, err := db.GetDpopToken(ctx, o.ID)
+	data.Set("Dpop", dpop)
+	oidc, err := db.GetOidcToken(ctx, o.ID)
+	data.Set("Oidc", oidc)
 
 	// Custom sign options passed to authority.Sign
 	var extraOptions []provisioner.SignOption
@@ -239,17 +254,63 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 	return nil
 }
 
+func (o *Order) subject(csr *x509.CertificateRequest) (subject x509util.Subject, err error) {
+	wireIDs, otherIDs := 0, 0
+	for _, identifier := range o.Identifiers {
+		switch identifier.Type {
+		case WireID:
+			wireID, err := wire.ParseID([]byte(identifier.Value))
+			if err != nil {
+				return subject, NewErrorISE("unmarshal wireID: %s", err)
+			}
+
+			// TODO: temporarily using a custom OIDC for carrying the display name without having it listed as a DNS SAN.
+			// reusing LDAP's OID for diplay name see http://oid-info.com/get/2.16.840.1.113730.3.1.241
+			displayNameOid := asn1.ObjectIdentifier{2, 16, 840, 1, 113730, 3, 1, 241}
+			var foundDisplayName = false
+			for _, entry := range csr.Subject.Names {
+				if entry.Type.Equal(displayNameOid) {
+					foundDisplayName = true
+					displayName := entry.Value.(string)
+					if displayName != wireID.Name {
+						return subject, NewErrorISE("expected displayName %v, found %v", wireID.Name, displayName)
+					}
+				}
+			}
+			if !foundDisplayName {
+				return subject, NewErrorISE("CSR must contain the display name in 2.16.840.1.113730.3.1.241 OID")
+			}
+			/*if csr.Subject.CommonName != wireID.Name {
+				return subject, NewErrorISE("expected CN %v, found %v", wireID.Name, csr.Subject.CommonName)
+			}*/
+
+			if len(csr.Subject.Organization) == 0 || !strings.EqualFold(csr.Subject.Organization[0], wireID.Domain) {
+				return subject, NewErrorISE("expected Organization [%s], found %v", wireID.Domain, csr.Subject.Organization)
+			}
+			subject.CommonName = wireID.Name
+			subject.Organization = []string{wireID.Domain}
+			wireIDs++
+		default:
+		}
+	}
+	if wireIDs > 0 && otherIDs > 0 || wireIDs > 1 {
+		return subject, NewErrorISE("at most one WireID can be signed along with no other ID, found %d WireIDs and %d other IDs", wireIDs, otherIDs)
+	}
+	return
+}
+
 func (o *Order) sans(csr *x509.CertificateRequest) ([]x509util.SubjectAlternativeName, error) {
 	var sans []x509util.SubjectAlternativeName
-	if len(csr.EmailAddresses) > 0 || len(csr.URIs) > 0 {
+	if len(csr.EmailAddresses) > 0 {
 		return sans, NewError(ErrorBadCSRType, "Only DNS names and IP addresses are allowed")
 	}
 
 	// order the DNS names and IP addresses, so that they can be compared against the canonicalized CSR
-	orderNames := make([]string, numberOfIdentifierType(DNS, o.Identifiers))
+	orderNames := make([]string, numberOfIdentifierType(DNS, o.Identifiers)+2*numberOfIdentifierType(WireID, o.Identifiers))
 	orderIPs := make([]net.IP, numberOfIdentifierType(IP, o.Identifiers))
 	orderPIDs := make([]string, numberOfIdentifierType(PermanentIdentifier, o.Identifiers))
-	indexDNS, indexIP, indexPID := 0, 0, 0
+	tmpOrderURIs := make([]*url.URL, 2*numberOfIdentifierType(WireID, o.Identifiers))
+	indexDNS, indexIP, indexPID, indexURI := 0, 0, 0, 0
 	for _, n := range o.Identifiers {
 		switch n.Type {
 		case DNS:
@@ -261,14 +322,33 @@ func (o *Order) sans(csr *x509.CertificateRequest) ([]x509util.SubjectAlternativ
 		case PermanentIdentifier:
 			orderPIDs[indexPID] = n.Value
 			indexPID++
+		case WireID:
+			wireID, err := wire.ParseID([]byte(n.Value))
+			if err != nil {
+				return sans, NewErrorISE("unsupported identifier value in order: %s", n.Value)
+			}
+			clientId, err := url.Parse(wireID.ClientID)
+			if err != nil {
+				return sans, NewErrorISE("clientId must be a URI: %s", wireID.ClientID)
+			}
+			tmpOrderURIs[indexURI] = clientId
+			indexURI++
+
+			handle, err := url.Parse(wireID.Handle)
+			if err != nil {
+				return sans, NewErrorISE("handle must be a URI: %s", wireID.Handle)
+			}
+			tmpOrderURIs[indexURI] = handle
+			indexURI++
 		default:
 			return sans, NewErrorISE("unsupported identifier type in order: %s", n.Type)
 		}
 	}
 	orderNames = uniqueSortedLowerNames(orderNames)
 	orderIPs = uniqueSortedIPs(orderIPs)
+	orderURIs := uniqueSortedURIStrings(tmpOrderURIs)
 
-	totalNumberOfSANs := len(csr.DNSNames) + len(csr.IPAddresses)
+	totalNumberOfSANs := len(csr.DNSNames) + len(csr.IPAddresses) + len(csr.URIs)
 	sans = make([]x509util.SubjectAlternativeName, totalNumberOfSANs)
 	index := 0
 
@@ -307,6 +387,26 @@ func (o *Order) sans(csr *x509.CertificateRequest) ([]x509util.SubjectAlternativ
 		sans[index] = x509util.SubjectAlternativeName{
 			Type:  x509util.IPType,
 			Value: csr.IPAddresses[i].String(),
+		}
+		index++
+	}
+
+	if len(csr.URIs) != len(tmpOrderURIs) {
+		return sans, NewError(ErrorBadCSRType, "CSR URIs do not match identifiers exactly: "+
+			"CSR URIs = %v, Order URIs = %v", csr.URIs, tmpOrderURIs)
+	}
+
+	// sort URI list
+	csrURIs := uniqueSortedURIStrings(csr.URIs)
+
+	for i := range csrURIs {
+		if csrURIs[i] != orderURIs[i] {
+			return sans, NewError(ErrorBadCSRType, "CSR URIs do not match identifiers exactly: "+
+				"CSR URIs = %v, Order URIs = %v", csr.URIs, tmpOrderURIs)
+		}
+		sans[index] = x509util.SubjectAlternativeName{
+			Type:  x509util.URIType,
+			Value: orderURIs[i],
 		}
 		index++
 	}
@@ -380,6 +480,21 @@ func uniqueSortedLowerNames(names []string) (unique []string) {
 	}
 	unique = make([]string, 0, len(nameMap))
 	for name := range nameMap {
+		if len(name) > 0 {
+			unique = append(unique, name)
+		}
+	}
+	sort.Strings(unique)
+	return
+}
+
+func uniqueSortedURIStrings(uris []*url.URL) (unique []string) {
+	uriMap := make(map[string]struct{}, len(uris))
+	for _, name := range uris {
+		uriMap[name.String()] = struct{}{}
+	}
+	unique = make([]string, 0, len(uriMap))
+	for name := range uriMap {
 		unique = append(unique, name)
 	}
 	sort.Strings(unique)

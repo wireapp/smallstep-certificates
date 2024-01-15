@@ -405,7 +405,7 @@ func wireOIDC01Validate(ctx context.Context, ch *Challenge, db DB, jwk *jose.JSO
 			"keyAuthorization does not match; expected %s, but got %s", expectedKeyAuth, claims.KeyAuth))
 	}
 
-	if challengeValues.Name != claims.Name || challengeValues.Handle != claims.Handle {
+	if challengeValues.Name != claims.Handle || challengeValues.Handle != claims.Name {
 		return storeError(ctx, db, ch, false, NewError(ErrorRejectedIdentifierType, "OIDC claims don't match"))
 	}
 

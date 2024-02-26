@@ -3,6 +3,7 @@ package acme
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/pkg/errors"
@@ -295,6 +296,7 @@ type Subproblem struct {
 
 // NewError creates a new Error.
 func NewError(pt ProblemType, msg string, args ...interface{}) *Error {
+	log.Printf(msg, args)
 	return newError(pt, errors.Errorf(msg, args...))
 }
 
@@ -302,6 +304,7 @@ func NewError(pt ProblemType, msg string, args ...interface{}) *Error {
 // message in the details, providing more information to the
 // ACME client.
 func NewDetailedError(pt ProblemType, msg string, args ...interface{}) *Error {
+	log.Printf(msg, args)
 	return NewError(pt, msg, args...).withDetail()
 }
 
@@ -368,6 +371,8 @@ func NewErrorISE(msg string, args ...interface{}) *Error {
 
 // WrapError attempts to wrap the internal error.
 func WrapError(typ ProblemType, err error, msg string, args ...interface{}) *Error {
+	log.Println(err)
+	log.Printf(msg, args)
 	var e *Error
 	switch {
 	case err == nil:
@@ -385,11 +390,15 @@ func WrapError(typ ProblemType, err error, msg string, args ...interface{}) *Err
 }
 
 func WrapDetailedError(typ ProblemType, err error, msg string, args ...interface{}) *Error {
+	log.Println(err)
+	log.Printf(msg, args)
 	return WrapError(typ, err, msg, args...).withDetail()
 }
 
 // WrapErrorISE shortcut to wrap an internal server error type.
 func WrapErrorISE(err error, msg string, args ...interface{}) *Error {
+	log.Println(err)
+	log.Printf(msg, args)
 	return WrapError(ErrorServerInternalType, err, msg, args...)
 }
 
